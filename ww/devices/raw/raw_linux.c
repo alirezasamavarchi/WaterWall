@@ -20,7 +20,7 @@ enum
     kMasterMessagePoolsbufGetLeftCapacity = 64,
     kRawWriteChannelQueueMax              = 8192
 };
-#define BATCH_SIZE 32
+#define BATCH_SIZE 64
 #define MAX_DRAIN  (BATCH_SIZE - 1)
 
 static WTHREAD_ROUTINE(routineWriteToRaw) // NOLINT
@@ -130,7 +130,7 @@ static WTHREAD_ROUTINE(routineWriteToRaw) // NOLINT
             {
                 
                 struct pollfd pfd = {.fd = rdev->socket, .events = POLLOUT};
-                int           pr  = poll(&pfd, 1, 50 /*ms timeout*/);
+                int           pr  = poll(&pfd, 1, 20 /*ms timeout*/);
                 if (pr <= 0)
                 {
                     // either timeout, error, or still not writable; continue loop to retry 
@@ -253,7 +253,7 @@ raw_device_t *rawdeviceCreate(const char *name, uint32_t mark, void *userdata)
     }
     fcntl(rsocket, F_SETFL, O_NONBLOCK);
 
-    int sndbuf = 4 * 1024 * 1024; /* 4MB */
+    int sndbuf = 8 * 1024 * 1024; /* 8MB */
     setsockopt(rsocket, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
     raw_device_t *rdev = memoryAllocate(sizeof(raw_device_t));
