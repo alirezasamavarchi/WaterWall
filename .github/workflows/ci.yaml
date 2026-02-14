@@ -5,8 +5,11 @@ permissions:
   contents: write
 
 
-on: [push, pull_request]
-
+push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+  
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
