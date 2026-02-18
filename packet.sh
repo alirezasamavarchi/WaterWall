@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# WaterWall Packet Tunnel Installer
-# Creates separate readable configs for Iran or Kharej side only
+# WaterWall Packet Tunnel Installer - Complete Version
+# Features: libatomic1, chmod +x, readable configs, Edit, Cron, Uninstall
 
 Purple='\033[0;35m'
 Cyan='\033[0;36m'
@@ -22,6 +22,9 @@ ensure_setup() {
   mkdir -p "$INSTALL_DIR"
   cd "$INSTALL_DIR" || exit 1
 
+  echo -e "${YELLOW}Installing required packages (libatomic1, unzip, jq, wget)...${NC}"
+  apt update -qq && apt install -y libatomic1 unzip jq wget
+
   if [ ! -f "Waterwall" ]; then
     echo -e "${YELLOW}Downloading Waterwall binary...${NC}"
     ARCH=$(uname -m)
@@ -32,7 +35,10 @@ ensure_setup() {
     fi
     URL=$(curl -s "https://api.github.com/repos/alirezasamavarchi/WaterWall/releases/latest" | jq -r ".assets[] | select(.name==\"$ASSET\") | .browser_download_url")
     [ -z "$URL" ] && { echo -e "${RED}Failed to get download URL.${NC}"; exit 1; }
-    wget -q --show-progress -O tmp.zip "$URL" && unzip -o tmp.zip && chmod +x Waterwall && rm tmp.zip
+    wget -q --show-progress -O tmp.zip "$URL" && unzip -o tmp.zip && rm tmp.zip
+
+    chmod +x Waterwall
+    echo -e "${Cyan}Waterwall is now executable.${NC}"
   fi
 
   if [ ! -f "$CORE_FILE" ]; then
@@ -96,7 +102,7 @@ EOF
 }
 
 setup_cron() {
-  read -p "Auto-restart every how many minutes? (0 = disable, recommended 30): " interval
+  read -p "Auto-restart every how many minutes? (0=disable, recommended 30): " interval
   interval=${interval:-30}
 
   (crontab -l 2>/dev/null | grep -v "waterwall.service") | crontab -
@@ -110,44 +116,85 @@ setup_cron() {
   fi
 }
 
-# ────────────────────────────── Iran Config (readable format) ──────────────────────────────
+list_tunnels() {
+  echo -e "\n${Purple}Current configs:${NC}"
+  ls -1 config*-*.json 2>/dev/null | while read -r f; do
+    echo "  - $f"
+  done || echo "No configs yet."
+}
+
+edit_tunnel() {
+  list_tunnels
+  read -p "Enter tunnel ID to edit (e.g. 1): " id
+
+  iran_file="config${id}-iran.json"
+  if [ ! -f "$iran_file" ]; then
+    echo -e "${RED}Config for ID $id not found.${NC}"
+    return
+  fi
+
+  echo -e "\nEditing config${id}-iran.json"
+  echo "  p = Fake port"
+  echo "  d = Device name"
+  echo "  i = Private IPs"
+  echo "  r = Protocol + number"
+  read -p "Choice (p/d/i/r): " opt
+
+  case $opt in
+    p)
+      read -p "New fake port: " np
+      jq --argjson n "$np" '(.nodes[] | select(.name=="input").settings.port) = $n' "$iran_file" > tmp.json && mv tmp.json "$iran_file"
+      ;;
+    d)
+      read -p "New device name: " nd
+      jq --arg n "$nd" '(.nodes[] | select(.type=="TunDevice").settings["device-name"]) = $n' "$iran_file" > tmp.json && mv tmp.json "$iran_file"
+      ;;
+    i)
+      read -p "New Private IP Iran: " ni
+      read -p "New Private IP Kharej: " nk
+      jq --arg ni "$ni" --arg nk "$nk" '
+        (.nodes[] | select(.type=="TunDevice").settings["device-ip"]) = "\($ni)/24";
+        (.nodes[] | select(.settings.ipv4 == "old_kh").settings.ipv4) = $nk  # adjust selector if needed
+      ' "$iran_file" > tmp.json && mv tmp.json "$iran_file"
+      ;;
+    r)
+      echo "1 = protoswap-udp   2 = protoswap-tcp"
+      read -p "New type: " nt
+      pr=$([ "$nt" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
+      read -p "New number: " nn
+      jq --arg k "$pr" --argjson v "$nn" '(.nodes[] | select(.type=="IpManipulator").settings) = {($k): $v}' "$iran_file" > tmp.json && mv tmp.json "$iran_file"
+      ;;
+    *) echo "Invalid" ;;
+  esac
+
+  echo -e "${Cyan}Updated. Restart service to apply: systemctl restart waterwall${NC}"
+}
+
+# ────────────────────────────── Create Iran Config ──────────────────────────────
 create_iran_config() {
   ensure_setup
 
   max=0
   for f in config*-iran.json; do
-    [[ $f =~ config([0-9]+)-iran.json ]] && ((BASH_REMATCH[1] > max)) && max=${BASH_REMATCH[1]}
+    [[ $f =~ config([0-9]+)-iran ]] && ((BASH_REMATCH[1] > max)) && max=${BASH_REMATCH[1]}
   done
   id=$((max + 1))
 
   echo -e "\n${Cyan}Creating Iran config #$id${NC}"
 
-  read -p "Device name (default wtun$id): " dev
-  dev=${dev:-wtun$id}
-
-  read -p "Private IP Iran (e.g. 10.10.0.1): " priv_ir
-  read -p "Private IP Kharej (e.g. 10.10.0.2): " priv_kh
-
+  read -p "Device name (default wtun$id): " dev; dev=${dev:-wtun$id}
+  read -p "Private IP Iran: " priv_ir
+  read -p "Private IP Kharej: " priv_kh
   read -p "Public IP Iran: " pub_ir
   read -p "Public IP Kharej: " pub_kh
 
-  echo -e "\nIpManipulator type:"
-  echo "  1 = protoswap-udp"
-  echo "  2 = protoswap-tcp"
-  read -p "Choose (1/2): " t
-  proto=$([ "$t" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
+  echo "IpManipulator: 1=udp  2=tcp"
+  read -p "Type: " t; proto=$([ "$t" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
+  read -p "Protocol number (default 112): " pnum; pnum=${pnum:-112}
 
-  read -p "Protocol number (default 112): " pnum
-  pnum=${pnum:-112}
-
-  read -p "Fake port (e.g. 443): " port
-  port=${port:-443}
-
-  echo "Listener type:"
-  echo "  1 = UDP"
-  echo "  2 = TCP"
-  read -p "Choose (1/2): " lt
-  listener=$([ "$lt" = "2" ] && echo "TcpListener" || echo "UdpListener")
+  read -p "Fake port: " port; port=${port:-443}
+  echo "1=UDP  2=TCP"
+  read -p "Type: " lt; listener=$([ "$lt" = "2" ] && echo "TcpListener" || echo "UdpListener")
   connector=$([ "$lt" = "2" ] && echo "TcpConnector" || echo "UdpConnector")
 
   cat > "config${id}-iran.json" << EOF
@@ -243,38 +290,30 @@ create_iran_config() {
 EOF
 
   update_core
-  echo -e "${Cyan}Iran config created: config${id}-iran.json${NC}"
+  echo -e "${Cyan}Iran config created.${NC}"
 }
 
-# ────────────────────────────── Kharej Config (readable format) ──────────────────────────────
+# ────────────────────────────── Create Kharej Config ──────────────────────────────
 create_kharej_config() {
   ensure_setup
 
   max=0
   for f in config*-kharej.json; do
-    [[ $f =~ config([0-9]+)-kharej.json ]] && ((BASH_REMATCH[1] > max)) && max=${BASH_REMATCH[1]}
+    [[ $f =~ config([0-9]+)-kharej ]] && ((BASH_REMATCH[1] > max)) && max=${BASH_REMATCH[1]}
   done
   id=$((max + 1))
 
   echo -e "\n${Cyan}Creating Kharej config #$id${NC}"
 
-  read -p "Device name (default wtun$id): " dev
-  dev=${dev:-wtun$id}
-
-  read -p "Private IP Iran (e.g. 10.10.0.1): " priv_ir
-  read -p "Private IP Kharej (e.g. 10.10.0.2): " priv_kh
-
+  read -p "Device name (default wtun$id): " dev; dev=${dev:-wtun$id}
+  read -p "Private IP Iran: " priv_ir
+  read -p "Private IP Kharej: " priv_kh
   read -p "Public IP Iran: " pub_ir
   read -p "Public IP Kharej: " pub_kh
 
-  echo -e "\nIpManipulator type:"
-  echo "  1 = protoswap-udp"
-  echo "  2 = protoswap-tcp"
-  read -p "Choose (1/2): " t
-  proto=$([ "$t" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
-
-  read -p "Protocol number (default 112): " pnum
-  pnum=${pnum:-112}
+  echo "IpManipulator: 1=udp  2=tcp"
+  read -p "Type: " t; proto=$([ "$t" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
+  read -p "Protocol number (default 112): " pnum; pnum=${pnum:-112}
 
   cat > "config${id}-kharej.json" << EOF
 {
@@ -350,41 +389,29 @@ create_kharej_config() {
 EOF
 
   update_core
-  echo -e "${Cyan}Kharej config created: config${id}-kharej.json${NC}"
+  echo -e "${Cyan}Kharej config created.${NC}"
 }
 
-# ────────────────────────────── Main Menu ──────────────────────────────
-
-ensure_setup
+# ────────────────────────────── Main Loop ──────────────────────────────
 
 while true; do
   echo -e "\n${Purple}Select option:${NC}"
   echo "  1. Create Iran config only"
   echo "  2. Create Kharej config only"
   echo "  3. List current configs"
-  echo "  4. Setup auto-restart cron"
-  echo "  5. Uninstall everything"
+  echo "  4. Edit existing config"
+  echo "  5. Setup / change auto-restart cron"
+  echo "  6. Uninstall everything"
   echo "  0. Exit"
   read -p "Choice: " ch
 
   case $ch in
-    1)
-      create_iran_config
-      create_service
-      setup_cron
-      ;;
-    2)
-      create_kharej_config
-      create_service
-      setup_cron
-      ;;
-    3)
-      list_tunnels
-      ;;
-    4)
-      setup_cron
-      ;;
-    5)
+    1) create_iran_config; create_service; setup_cron ;;
+    2) create_kharej_config; create_service; setup_cron ;;
+    3) list_tunnels ;;
+    4) edit_tunnel ;;
+    5) setup_cron ;;
+    6)
       read -p "Uninstall ALL? (y/N): " y
       [[ "$y" =~ ^[Yy]$ ]] && {
         systemctl stop waterwall 2>/dev/null
@@ -396,12 +423,7 @@ while true; do
         echo -e "${YELLOW}Uninstall completed.${NC}"
       }
       ;;
-    0)
-      echo "Exiting..."
-      exit 0
-      ;;
-    *)
-      echo -e "${RED}Invalid choice${NC}"
-      ;;
+    0) echo "Exiting..."; exit 0 ;;
+    *) echo -e "${RED}Invalid${NC}" ;;
   esac
 done
