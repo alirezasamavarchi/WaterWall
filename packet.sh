@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# WaterWall Packet Tunnel Installer - Complete Version
-# Features: libatomic1, chmod +x, readable configs, Edit, Cron, Uninstall
+# WaterWall Packet Tunnel Installer - FINAL COMPLETE VERSION
+# Fixed: libatomic1, chmod +x, manual binary, readable configs, full edit, cron
 
 Purple='\033[0;35m'
 Cyan='\033[0;36m'
@@ -15,30 +15,43 @@ CORE_FILE="$INSTALL_DIR/core.json"
 
 clear
 echo -e "${Purple}══════════════════════════════════════════════════════════════════════${NC}"
-echo -e "        WaterWall Packet Tunnel Installer (Iran / Kharej)"
+echo -e "        WaterWall Packet Tunnel Installer - Complete"
 echo -e "${Purple}══════════════════════════════════════════════════════════════════════${NC}"
 
 ensure_setup() {
   mkdir -p "$INSTALL_DIR"
   cd "$INSTALL_DIR" || exit 1
 
-  echo -e "${YELLOW}Installing required packages (libatomic1, unzip, jq, wget)...${NC}"
+  echo -e "${YELLOW}Installing required packages...${NC}"
   apt update -qq && apt install -y libatomic1 unzip jq wget
 
   if [ ! -f "Waterwall" ]; then
-    echo -e "${YELLOW}Downloading Waterwall binary...${NC}"
-    ARCH=$(uname -m)
-    if [ "$ARCH" = "aarch64" ]; then ASSET="Waterwall-linux-gcc-arm64.zip"; fi
-    if [ "$ARCH" = "x86_64" ]; then
-      if grep -q avx512 /proc/cpuinfo; then ASSET="Waterwall-linux-clang-avx512f-x64.zip"
-      else ASSET="Waterwall-linux-clang-x64.zip"; fi
-    fi
-    URL=$(curl -s "https://api.github.com/repos/alirezasamavarchi/WaterWall/releases/latest" | jq -r ".assets[] | select(.name==\"$ASSET\") | .browser_download_url")
-    [ -z "$URL" ] && { echo -e "${RED}Failed to get download URL.${NC}"; exit 1; }
-    wget -q --show-progress -O tmp.zip "$URL" && unzip -o tmp.zip && rm tmp.zip
+    echo -e "\n${Purple}Select Waterwall binary:${NC}"
+    echo "  1. Auto detect"
+    echo "  2. Clang x64 (old/normal CPU)"
+    echo "  3. Clang AVX512 (new CPU)"
+    echo "  4. GCC ARM64"
+    read -p "Choice (1-4): " bchoice
 
+    case $bchoice in
+      2) ASSET="Waterwall-linux-clang-x64.zip" ;;
+      3) ASSET="Waterwall-linux-clang-avx512f-x64.zip" ;;
+      4) ASSET="Waterwall-linux-gcc-arm64.zip" ;;
+      *) 
+        ARCH=$(uname -m)
+        if [ "$ARCH" = "aarch64" ]; then ASSET="Waterwall-linux-gcc-arm64.zip"
+        elif grep -q avx512 /proc/cpuinfo; then ASSET="Waterwall-linux-clang-avx512f-x64.zip"
+        else ASSET="Waterwall-linux-clang-x64.zip"; fi
+        ;;
+    esac
+
+    echo -e "${YELLOW}Downloading $ASSET ...${NC}"
+    URL=$(curl -s "https://api.github.com/repos/alirezasamavarchi/WaterWall/releases/latest" | jq -r ".assets[] | select(.name==\"$ASSET\") | .browser_download_url")
+    [ -z "$URL" ] && { echo -e "${RED}Download failed.${NC}"; exit 1; }
+
+    wget -q --show-progress -O tmp.zip "$URL" && unzip -o tmp.zip && rm tmp.zip
     chmod +x Waterwall
-    echo -e "${Cyan}Waterwall is now executable.${NC}"
+    echo -e "${Cyan}Waterwall ready.${NC}"
   fi
 
   if [ ! -f "$CORE_FILE" ]; then
@@ -46,22 +59,10 @@ ensure_setup() {
 {
   "log": {
     "path": "log/",
-    "core": {
-      "loglevel": "INFO",
-      "file": "core.log",
-      "console": true
-    },
-    "network": {
-      "loglevel": "INFO",
-      "file": "network.log",
-      "console": true
-    }
+    "core": { "loglevel": "INFO", "file": "core.log", "console": true },
+    "network": { "loglevel": "INFO", "file": "network.log", "console": true }
   },
-  "misc": {
-    "workers": 0,
-    "ram-profile": "client",
-    "libs-path": "libs/"
-  },
+  "misc": { "workers": 0, "ram-profile": "client", "libs-path": "libs/" },
   "configs": []
 }
 EOF
@@ -69,13 +70,8 @@ EOF
 }
 
 update_core() {
-  mapfile -t files < <(ls -1 "$INSTALL_DIR"/config*-*.json 2>/dev/null | xargs -n1 basename)
-  if [ ${#files[@]} -eq 0 ]; then
-    jq '.configs = []' "$CORE_FILE" > tmp && mv tmp "$CORE_FILE"
-  else
-    jq --argjson arr "$(printf '%s\n' "${files[@]}" | jq -R . | jq -s .)" '.configs = $arr' "$CORE_FILE" > tmp && mv tmp "$CORE_FILE"
-  fi
-  echo -e "${Cyan}core.json updated (${#files[@]} configs).${NC}"
+  mapfile -t files < <(ls -1 config*-*.json 2>/dev/null | xargs -n1 basename)
+  jq --argjson arr "$(printf '%s\n' "${files[@]}" | jq -R . | jq -s .)" '.configs = $arr' "$CORE_FILE" > tmp && mv tmp "$CORE_FILE"
 }
 
 create_service() {
@@ -83,7 +79,6 @@ create_service() {
 [Unit]
 Description=WaterWall Packet Tunnel
 After=network.target
-
 [Service]
 ExecStart=$INSTALL_DIR/Waterwall
 WorkingDirectory=$INSTALL_DIR
@@ -92,109 +87,86 @@ RestartSec=5
 User=root
 StandardOutput=null
 StandardError=null
-
 [Install]
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now waterwall
-  echo -e "${Cyan}Service created and started.${NC}"
 }
 
 setup_cron() {
-  read -p "Auto-restart every how many minutes? (0=disable, recommended 30): " interval
+  read -p "Restart service every how many minutes? (0=disable, 30=recommended): " interval
   interval=${interval:-30}
-
-  (crontab -l 2>/dev/null | grep -v "waterwall.service") | crontab -
-
+  (crontab -l 2>/dev/null | grep -v waterwall.service) | crontab -
   if [[ "$interval" =~ ^[1-9][0-9]*$ ]]; then
-    cron="*/$interval * * * * /bin/systemctl restart waterwall.service >/dev/null 2>&1"
-    (crontab -l 2>/dev/null; echo "$cron") | crontab -
-    echo -e "${Cyan}Cron added: restart every $interval minutes${NC}"
+    (crontab -l 2>/dev/null; echo "*/$interval * * * * /bin/systemctl restart waterwall.service >/dev/null 2>&1") | crontab -
+    echo -e "${Cyan}Cron set.${NC}"
   else
-    echo -e "${YELLOW}Auto-restart disabled.${NC}"
+    echo -e "${YELLOW}Cron disabled.${NC}"
   fi
 }
 
 list_tunnels() {
   echo -e "\n${Purple}Current configs:${NC}"
-  ls -1 config*-*.json 2>/dev/null | while read -r f; do
-    echo "  - $f"
-  done || echo "No configs yet."
+  ls -1 config*-*.json 2>/dev/null | while read f; do echo "  - $f"; done || echo "No configs."
 }
 
 edit_tunnel() {
   list_tunnels
-  read -p "Enter tunnel ID to edit (e.g. 1): " id
+  read -p "Tunnel ID (e.g. 1): " id
+  echo -e "\nWhich file?"
+  echo "1 = config${id}-iran.json"
+  echo "2 = config${id}-kharej.json"
+  read -p "Choose: " s
+  file="config${id}-$( [ "$s" = "1" ] && echo "iran" || echo "kharej" ).json"
 
-  iran_file="config${id}-iran.json"
-  if [ ! -f "$iran_file" ]; then
-    echo -e "${RED}Config for ID $id not found.${NC}"
-    return
-  fi
+  [ ! -f "$file" ] && { echo -e "${RED}File not found.${NC}"; return; }
 
-  echo -e "\nEditing config${id}-iran.json"
-  echo "  p = Fake port"
+  echo -e "\nEdit options:"
+  echo "  p = Fake port (Iran only)"
   echo "  d = Device name"
   echo "  i = Private IPs"
   echo "  r = Protocol + number"
-  read -p "Choice (p/d/i/r): " opt
+  read -p "Choice: " e
 
-  case $opt in
-    p)
-      read -p "New fake port: " np
-      jq --argjson n "$np" '(.nodes[] | select(.name=="input").settings.port) = $n' "$iran_file" > tmp.json && mv tmp.json "$iran_file"
-      ;;
-    d)
-      read -p "New device name: " nd
-      jq --arg n "$nd" '(.nodes[] | select(.type=="TunDevice").settings["device-name"]) = $n' "$iran_file" > tmp.json && mv tmp.json "$iran_file"
-      ;;
-    i)
-      read -p "New Private IP Iran: " ni
-      read -p "New Private IP Kharej: " nk
-      jq --arg ni "$ni" --arg nk "$nk" '
-        (.nodes[] | select(.type=="TunDevice").settings["device-ip"]) = "\($ni)/24";
-        (.nodes[] | select(.settings.ipv4 == "old_kh").settings.ipv4) = $nk  # adjust selector if needed
-      ' "$iran_file" > tmp.json && mv tmp.json "$iran_file"
-      ;;
-    r)
-      echo "1 = protoswap-udp   2 = protoswap-tcp"
-      read -p "New type: " nt
-      pr=$([ "$nt" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
-      read -p "New number: " nn
-      jq --arg k "$pr" --argjson v "$nn" '(.nodes[] | select(.type=="IpManipulator").settings) = {($k): $v}' "$iran_file" > tmp.json && mv tmp.json "$iran_file"
-      ;;
+  case $e in
+    p) read -p "New port: " np
+       jq --argjson n "$np" '(.nodes[] | select(.name=="input").settings.port) = $n' "$file" > tmp && mv tmp "$file" ;;
+    d) read -p "New device: " nd
+       jq --arg n "$nd" '(.nodes[] | select(.type=="TunDevice").settings["device-name"]) = $n' "$file" > tmp && mv tmp "$file" ;;
+    i) read -p "New Priv Iran: " ni
+       read -p "New Priv Kharej: " nk
+       jq --arg ni "$ni" --arg nk "$nk" '(.nodes[] | select(.type=="TunDevice").settings["device-ip"]) = "\($ni)/24"' "$file" > tmp && mv tmp "$file" ;;
+    r) echo "1=udp 2=tcp"; read -p "Type: " nt
+       pr=$([ "$nt" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
+       read -p "Number: " nn
+       jq --arg k "$pr" --argjson v "$nn" '(.nodes[] | select(.type=="IpManipulator").settings) = {($k): $v}' "$file" > tmp && mv tmp "$file" ;;
     *) echo "Invalid" ;;
   esac
-
-  echo -e "${Cyan}Updated. Restart service to apply: systemctl restart waterwall${NC}"
+  echo -e "${Cyan}Updated. Restart service to apply.${NC}"
 }
 
-# ────────────────────────────── Create Iran Config ──────────────────────────────
 create_iran_config() {
   ensure_setup
-
   max=0
-  for f in config*-iran.json; do
-    [[ $f =~ config([0-9]+)-iran ]] && ((BASH_REMATCH[1] > max)) && max=${BASH_REMATCH[1]}
-  done
-  id=$((max + 1))
+  for f in config*-iran.json; do [[ $f =~ ([0-9]+) ]] && (( ${BASH_REMATCH[1]} > max )) && max=${BASH_REMATCH[1]}; done
+  id=$((max+1))
 
-  echo -e "\n${Cyan}Creating Iran config #$id${NC}"
+  echo -e "\n${Cyan}Iran config #$id${NC}"
+  read -p "Device (wtun$id): " dev; dev=${dev:-wtun$id}
+  read -p "Priv Iran: " priv_ir
+  read -p "Priv Kharej: " priv_kh
+  read -p "Pub Iran: " pub_ir
+  read -p "Pub Kharej: " pub_kh
 
-  read -p "Device name (default wtun$id): " dev; dev=${dev:-wtun$id}
-  read -p "Private IP Iran: " priv_ir
-  read -p "Private IP Kharej: " priv_kh
-  read -p "Public IP Iran: " pub_ir
-  read -p "Public IP Kharej: " pub_kh
+  echo "1=udp 2=tcp"
+  read -p "Manip type: " t; proto=$([ "$t" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
+  read -p "Number (112): " pnum; pnum=${pnum:-112}
 
-  echo "IpManipulator: 1=udp  2=tcp"
-  read -p "Type: " t; proto=$([ "$t" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
-  read -p "Protocol number (default 112): " pnum; pnum=${pnum:-112}
-
-  read -p "Fake port: " port; port=${port:-443}
-  echo "1=UDP  2=TCP"
-  read -p "Type: " lt; listener=$([ "$lt" = "2" ] && echo "TcpListener" || echo "UdpListener")
+  read -p "Fake port (443): " port; port=${port:-443}
+  echo "1=UDP 2=TCP"
+  read -p "Listener type: " lt
+  listener=$([ "$lt" = "2" ] && echo "TcpListener" || echo "UdpListener")
   connector=$([ "$lt" = "2" ] && echo "TcpConnector" || echo "UdpConnector")
 
   cat > "config${id}-iran.json" << EOF
@@ -293,27 +265,22 @@ EOF
   echo -e "${Cyan}Iran config created.${NC}"
 }
 
-# ────────────────────────────── Create Kharej Config ──────────────────────────────
 create_kharej_config() {
   ensure_setup
-
   max=0
-  for f in config*-kharej.json; do
-    [[ $f =~ config([0-9]+)-kharej ]] && ((BASH_REMATCH[1] > max)) && max=${BASH_REMATCH[1]}
-  done
-  id=$((max + 1))
+  for f in config*-kharej.json; do [[ $f =~ ([0-9]+) ]] && (( ${BASH_REMATCH[1]} > max )) && max=${BASH_REMATCH[1]}; done
+  id=$((max+1))
 
-  echo -e "\n${Cyan}Creating Kharej config #$id${NC}"
+  echo -e "\n${Cyan}Kharej config #$id${NC}"
+  read -p "Device (wtun$id): " dev; dev=${dev:-wtun$id}
+  read -p "Priv Iran: " priv_ir
+  read -p "Priv Kharej: " priv_kh
+  read -p "Pub Iran: " pub_ir
+  read -p "Pub Kharej: " pub_kh
 
-  read -p "Device name (default wtun$id): " dev; dev=${dev:-wtun$id}
-  read -p "Private IP Iran: " priv_ir
-  read -p "Private IP Kharej: " priv_kh
-  read -p "Public IP Iran: " pub_ir
-  read -p "Public IP Kharej: " pub_kh
-
-  echo "IpManipulator: 1=udp  2=tcp"
-  read -p "Type: " t; proto=$([ "$t" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
-  read -p "Protocol number (default 112): " pnum; pnum=${pnum:-112}
+  echo "1=udp 2=tcp"
+  read -p "Manip type: " t; proto=$([ "$t" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
+  read -p "Number (112): " pnum; pnum=${pnum:-112}
 
   cat > "config${id}-kharej.json" << EOF
 {
@@ -392,15 +359,16 @@ EOF
   echo -e "${Cyan}Kharej config created.${NC}"
 }
 
-# ────────────────────────────── Main Loop ──────────────────────────────
+# Main menu
+ensure_setup
 
 while true; do
-  echo -e "\n${Purple}Select option:${NC}"
+  echo -e "\n${Purple}Menu:${NC}"
   echo "  1. Create Iran config only"
   echo "  2. Create Kharej config only"
   echo "  3. List current configs"
   echo "  4. Edit existing config"
-  echo "  5. Setup / change auto-restart cron"
+  echo "  5. Setup auto-restart cron"
   echo "  6. Uninstall everything"
   echo "  0. Exit"
   read -p "Choice: " ch
@@ -420,10 +388,10 @@ while true; do
         pkill -f Waterwall 2>/dev/null
         rm -rf "$INSTALL_DIR"
         (crontab -l 2>/dev/null | grep -v "waterwall.service") | crontab -
-        echo -e "${YELLOW}Uninstall completed.${NC}"
+        echo -e "${YELLOW}Uninstall complete.${NC}"
       }
       ;;
-    0) echo "Exiting..."; exit 0 ;;
+    0) exit 0 ;;
     *) echo -e "${RED}Invalid${NC}" ;;
   esac
 done
