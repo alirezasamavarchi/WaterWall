@@ -1,10 +1,6 @@
 #!/bin/bash
 
-# ────────────────────────────────────────────────
-#   Packet Tunnel Manager - WaterWall
-#   Add / List / Edit / Delete / Logs / Uninstall
-# ────────────────────────────────────────────────
-
+# Colors
 Purple='\033[0;35m'
 Cyan='\033[0;36m'
 YELLOW='\033[0;33m'
@@ -14,16 +10,13 @@ NC='\033[0m'
 
 INSTALL_DIR="/root/packet-tunnel"
 CORE_FILE="$INSTALL_DIR/core.json"
-CONFIG_PREFIX="config"
 
 clear
 echo -e "${Purple}══════════════════════════════════════════════════════════════════════${NC}"
-echo -e "        Packet Tunnel Manager - WaterWall (2025 edition)"
+echo -e "        WaterWall Packet Tunnel Installer (Iran + Kharej + Cron)"
 echo -e "${Purple}══════════════════════════════════════════════════════════════════════${NC}"
 
-# ────────────────────────────── Helper Functions ──────────────────────────────
-
-ensure_core() {
+ensure_setup() {
   mkdir -p "$INSTALL_DIR"
   cd "$INSTALL_DIR" || exit 1
 
@@ -35,8 +28,8 @@ ensure_core() {
       if grep -q avx512 /proc/cpuinfo; then ASSET="Waterwall-linux-clang-avx512f-x64.zip"
       else ASSET="Waterwall-linux-clang-x64.zip"; fi
     fi
-
     URL=$(curl -s "https://api.github.com/repos/alirezasamavarchi/WaterWall/releases/latest" | jq -r ".assets[] | select(.name==\"$ASSET\") | .browser_download_url")
+    [ -z "$URL" ] && { echo -e "${RED}Failed to get download URL.${NC}"; exit 1; }
     wget -q --show-progress -O tmp.zip "$URL" && unzip -o tmp.zip && chmod +x Waterwall && rm tmp.zip
   fi
 
@@ -55,11 +48,22 @@ EOF
   fi
 }
 
-setup_service() {
+update_core_configs() {
+  mapfile -t files < <(ls -1 "$INSTALL_DIR"/config*-*.json 2>/dev/null | xargs -n1 basename)
+  if [ ${#files[@]} -eq 0 ]; then
+    jq '.configs = []' "$CORE_FILE" > tmp && mv tmp "$CORE_FILE"
+  else
+    jq --argjson arr "$(printf '%s\n' "${files[@]}" | jq -R . | jq -s .)" '.configs = $arr' "$CORE_FILE" > tmp && mv tmp "$CORE_FILE"
+  fi
+  echo -e "${Cyan}core.json updated (${#files[@]} configs loaded)${NC}"
+}
+
+create_service() {
   cat > /etc/systemd/system/waterwall.service << EOF
 [Unit]
 Description=WaterWall Packet Tunnel
 After=network.target
+
 [Service]
 ExecStart=$INSTALL_DIR/Waterwall
 WorkingDirectory=$INSTALL_DIR
@@ -68,95 +72,92 @@ RestartSec=5
 User=root
 StandardOutput=null
 StandardError=null
+
 [Install]
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable --now waterwall
+  echo -e "${Cyan}Service created and started.${NC}"
 }
 
-list_tunnels() {
-  if [ ! -s "$CORE_FILE" ]; then echo -e "${YELLOW}No tunnels yet.${NC}"; return; fi
+setup_auto_restart() {
+  echo -e "\n${Purple}Enable auto-restart to prevent hanging?${NC}"
+  echo "  0 = Disable"
+  echo " 15 = Every 15 minutes"
+  echo " 30 = Every 30 minutes (recommended)"
+  echo " 60 = Every 60 minutes"
+  read -p "Interval in minutes (default 30): " interval
+  interval=${interval:-30}
 
-  echo -e "\n${Purple}Current tunnels:${NC}"
-  jq -r '.configs[]' "$CORE_FILE" 2>/dev/null | while read -r conf; do
-    f="$INSTALL_DIR/$conf"
-    [ -f "$f" ] || { echo -e "${RED}$conf (missing file)${NC}"; continue; }
+  # Remove old waterwall cron jobs
+  (crontab -l 2>/dev/null | grep -v "waterwall.service") | crontab -
 
-    name=$(jq -r '.name' "$f" 2>/dev/null)
-    dev=$(jq -r '.nodes[] | select(.type=="TunDevice") | .settings["device-name"]' "$f" 2>/dev/null || echo "-")
-    port=$(jq -r '.nodes[] | select(.name=="input") | .settings.port' "$f" 2>/dev/null || echo "-")
-    proto_key=$(jq -r '.nodes[] | select(.type=="IpManipulator") | .settings | keys[]' "$f" 2>/dev/null || echo "-")
-    proto_val=$(jq -r ".nodes[] | select(.type==\"IpManipulator\") | .settings.$proto_key" "$f" 2>/dev/null || echo "-")
-
-    num=${conf#${CONFIG_PREFIX}}
-    num=${num%.json}
-    echo -e "  ${White}$num)${NC} $conf → $name | dev: $dev | port: $port | $proto_key: $proto_val"
-  done
-}
-
-update_core() {
-  mapfile -t files < <(ls -1 "$INSTALL_DIR"/${CONFIG_PREFIX}*.json 2>/dev/null | xargs -n1 basename)
-  if [ ${#files[@]} -eq 0 ]; then
-    jq '.configs = []' "$CORE_FILE" > tmp && mv tmp "$CORE_FILE"
+  if [[ "$interval" =~ ^(15|30|60)$ ]]; then
+    cron_job="*/$interval * * * * /bin/systemctl restart waterwall.service >/dev/null 2>&1 # Waterwall auto-restart"
+    (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
+    echo -e "${Cyan}Cron added: restart every $interval minutes${NC}"
   else
-    jq --argjson arr "$(printf '%s\n' "${files[@]}" | jq -R . | jq -s .)" '.configs = $arr' "$CORE_FILE" > tmp && mv tmp "$CORE_FILE"
+    echo -e "${YELLOW}Auto-restart disabled.${NC}"
   fi
-  echo -e "${Cyan}core.json updated.${NC}"
 }
 
-# ────────────────────────────── Add New Tunnel ──────────────────────────────
+# ────────────────────────────── Create Tunnel Pair ──────────────────────────────
 
-add_tunnel() {
-  ensure_core
+create_tunnel_pair() {
+  ensure_setup
 
-  # پیدا کردن بعدی‌ترین شماره
-  max=0
-  for f in ${CONFIG_PREFIX}*.json; do
-    [[ $f =~ ${CONFIG_PREFIX}([0-9]+)\.json ]] && (( ${BASH_REMATCH[1]} > max )) && max=${BASH_REMATCH[1]}
+  # Find next ID
+  max_id=0
+  for f in config*-iran.json; do
+    [[ $f =~ config([0-9]+)-iran.json ]] && (( ${BASH_REMATCH[1]} > max_id )) && max_id=${BASH_REMATCH[1]}
   done
-  next=$((max + 1))
+  next_id=$((max_id + 1))
 
-  echo -e "\n${Cyan}Adding new tunnel → config${next}.json${NC}"
+  echo -e "\n${Cyan}Creating tunnel pair #$next_id${NC}"
 
-  read -p "Device name (wtunX) [default wtun$next]: " dev
-  dev=${dev:-wtun$next}
+  read -p "Device name (e.g. wtun$next_id): " DEVICE
+  DEVICE=${DEVICE:-wtun$next_id}
 
-  read -p "Private IP Iran (e.g. 10.66.$next.1): " priv_ir
-  read -p "Private IP Kharej (e.g. 10.66.$next.2): " priv_kh
+  read -p "Private IP Iran (e.g. 10.10.$next_id.1): " PRIV_IRAN
+  read -p "Private IP Kharej (e.g. 10.10.$next_id.2): " PRIV_KHAREJ
 
-  echo -e "\n${Purple}Manipulator:${NC}  1=udp   2=tcp"
-  read -p "Type: " ptyp
-  proto=$([ "$ptyp" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
+  echo -e "\n${Purple}IpManipulator settings:${NC}"
+  echo "  1 = protoswap-udp"
+  echo "  2 = protoswap-tcp"
+  read -p "Choose (1 or 2): " ptype
+  PROTO=$([ "$ptype" = "2" ] && echo "protoswap-tcp" || echo "protoswap-udp")
 
-  read -p "Protocol number (default 100+$next): " pnum
-  pnum=${pnum:-$((100 + next))}
+  read -p "Protocol number (0-255) [default 112]: " pnum
+  pnum=${pnum:-112}
 
   FAKE_PORT=""
-  LIST_TYPE="UdpListener"
-  CONN_TYPE="UdpConnector"
+  LISTENER_TYPE="UdpListener"
+  CONNECTOR_TYPE="UdpConnector"
 
-  if [[ "$side" == "iran" ]]; then
-    read -p "Fake port (e.g. 80,443,53): " FAKE_PORT
-    FAKE_PORT=${FAKE_PORT:-80}
+  read -p "Public IP Iran: " PUB_IRAN
+  read -p "Public IP Kharej: " PUB_KHAREJ
 
-    read -p "1=UDP   2=TCP : " ltyp
-    [ "$ltyp" = "2" ] && { LIST_TYPE="TcpListener"; CONN_TYPE="TcpConnector"; }
+  if [ "$side" = "iran" ]; then
+    read -p "Fake port (e.g. 80, 443, 53): " FAKE_PORT
+    FAKE_PORT=${FAKE_PORT:-443}
+
+    echo "  1 = UDP    2 = TCP"
+    read -p "Listener type: " ltype
+    [ "$ltype" = "2" ] && { LISTENER_TYPE="TcpListener"; CONNECTOR_TYPE="TcpConnector"; }
   fi
 
-  read -p "Public IP Iran: " pub_ir
-  read -p "Public IP Kharej: " pub_kh
-
-  cat > "config${next}.json" << EOF
+  # ─── Iran config ───
+  cat > "config${next_id}-iran.json" << EOF
 {
-  "name": "tunnel-${next}",
+  "name": "packet-tunnel-iran-${next_id}",
   "nodes": [
     {
-      "name": "mytun",
+      "name": "my tun",
       "type": "TunDevice",
       "settings": {
-        "device-name": "$dev",
-        "device-ip": "$priv_ir/24"
+        "device-name": "$DEVICE",
+        "device-ip": "$PRIV_IRAN/24"
       },
       "next": "ipovsrc"
     },
@@ -166,7 +167,7 @@ add_tunnel() {
       "settings": {
         "direction": "up",
         "mode": "source-ip",
-        "ipv4": "$pub_ir"
+        "ipv4": "$PUB_IRAN"
       },
       "next": "ipovdest"
     },
@@ -176,7 +177,7 @@ add_tunnel() {
       "settings": {
         "direction": "up",
         "mode": "dest-ip",
-        "ipv4": "$pub_kh"
+        "ipv4": "$PUB_KHAREJ"
       },
       "next": "manip"
     },
@@ -184,7 +185,7 @@ add_tunnel() {
       "name": "manip",
       "type": "IpManipulator",
       "settings": {
-        "$proto": $pnum
+        "$PROTO": $pnum
       },
       "next": "ipovsrc2"
     },
@@ -194,7 +195,7 @@ add_tunnel() {
       "settings": {
         "direction": "down",
         "mode": "source-ip",
-        "ipv4": "$priv_kh"
+        "ipv4": "$PRIV_KHAREJ"
       },
       "next": "ipovdest2"
     },
@@ -204,7 +205,7 @@ add_tunnel() {
       "settings": {
         "direction": "down",
         "mode": "dest-ip",
-        "ipv4": "$priv_ir"
+        "ipv4": "$PRIV_IRAN"
       },
       "next": "rd"
     },
@@ -213,105 +214,164 @@ add_tunnel() {
       "type": "RawSocket",
       "settings": {
         "capture-filter-mode": "source-ip",
-        "capture-ip": "$pub_kh"
+        "capture-ip": "$PUB_KHAREJ"
       }
-    }
-EOF
-
-  if [[ "$side" == "iran" ]]; then
-    cat >> "config${next}.json" << EOF
-    ,{
+    },
+    {
       "name": "input",
-      "type": "$LIST_TYPE",
+      "type": "$LISTENER_TYPE",
       "settings": {
         "address": "0.0.0.0",
-        "port": $FAKE_PORT
+        "port": $FAKE_PORT,
+        "nodelay": true
       },
       "next": "output"
     },
     {
       "name": "output",
-      "type": "$CONN_TYPE",
+      "type": "$CONNECTOR_TYPE",
       "settings": {
-        "address": "$priv_kh",
+        "nodelay": true,
+        "address": "$PRIV_KHAREJ",
         "port": $FAKE_PORT
       }
     }
+  ]
+}
 EOF
-  fi
 
-  echo "  ]" >> "config${next}.json"
-  echo "}" >> "config${next}.json"
+  # ─── Kharej config ───
+  cat > "config${next_id}-kharej.json" << EOF
+{
+  "name": "packet-tunnel-kharej-${next_id}",
+  "nodes": [
+    {
+      "name": "rd",
+      "type": "RawSocket",
+      "settings": {
+        "capture-filter-mode": "source-ip",
+        "capture-ip": "$PUB_IRAN"
+      },
+      "next": "ipovsrc"
+    },
+    {
+      "name": "ipovsrc",
+      "type": "IpOverrider",
+      "settings": {
+        "direction": "down",
+        "mode": "source-ip",
+        "ipv4": "$PUB_KHAREJ"
+      },
+      "next": "ipovdest"
+    },
+    {
+      "name": "ipovdest",
+      "type": "IpOverrider",
+      "settings": {
+        "direction": "down",
+        "mode": "dest-ip",
+        "ipv4": "$PUB_IRAN"
+      },
+      "next": "manip"
+    },
+    {
+      "name": "manip",
+      "type": "IpManipulator",
+      "settings": {
+        "$PROTO": $pnum
+      },
+      "next": "ipovsrc2"
+    },
+    {
+      "name": "ipovsrc2",
+      "type": "IpOverrider",
+      "settings": {
+        "direction": "up",
+        "mode": "source-ip",
+        "ipv4": "$PRIV_KHAREJ"
+      },
+      "next": "ipovdest2"
+    },
+    {
+      "name": "ipovdest2",
+      "type": "IpOverrider",
+      "settings": {
+        "direction": "up",
+        "mode": "dest-ip",
+        "ipv4": "$PRIV_IRAN"
+      },
+      "next": "my tun"
+    },
+    {
+      "name": "my tun",
+      "type": "TunDevice",
+      "settings": {
+        "device-name": "$DEVICE",
+        "device-ip": "$PRIV_IRAN/24"
+      }
+    }
+  ]
+}
+EOF
 
-  update_core
-  echo -e "${Cyan}Tunnel $next added.${NC}"
+  update_core_configs
+  echo -e "\n${Cyan}Tunnel pair #$next_id created:${NC}"
+  echo "  config${next_id}-iran.json"
+  echo "  config${next_id}-kharej.json"
+  echo ""
+  echo "Device: $DEVICE"
+  echo "Private IP Iran: $PRIV_IRAN/24"
+  echo "Private IP Kharej: $PRIV_KHAREJ"
+  echo "Protocol: $PROTO : $pnum"
+  [ -n "$FAKE_PORT" ] && echo "Fake port (Iran): $FAKE_PORT"
+  echo "Public IP Iran: $PUB_IRAN"
+  echo "Public IP Kharej: $PUB_KHAREJ"
 }
 
 # ────────────────────────────── Main Loop ──────────────────────────────
 
-ensure_core
-
 while true; do
-  echo -e "\n${Purple}Menu:${NC}"
-  echo "  1   Add new tunnel"
-  echo "  2   List tunnels"
-  echo "  3   Edit tunnel"
-  echo "  4   Delete tunnel"
-  echo "  5   View logs"
-  echo "  6   Uninstall all"
-  echo "  0   Exit"
-  read -p "→ " choice
+  echo -e "\n${Purple}Select option:${NC}"
+  echo "  1. Create new tunnel pair (Iran + Kharej)"
+  echo "  2. Setup / change auto-restart cron"
+  echo "  3. Show current cron jobs"
+  echo "  4. Uninstall everything"
+  echo "  0. Exit"
+  read -p "Choice: " choice
 
   case $choice in
-    1)  read -p "Iran or Kharej side? (i/k): " side_choice
-        side=$([ "$side_choice" = "i" ] && echo "iran" || echo "kharej")
-        add_tunnel
-        setup_service
-        ;;
-    2)  list_tunnels ;;
-    3)  list_tunnels
-        read -p "Edit which number? " en
-        ef="config${en}.json"
-        [ -f "$ef" ] || { echo -e "${RED}Not found${NC}"; continue; }
-
-        echo "  p = port    d = device    i = private IPs    r = proto+number"
-        read -p "What to change? " ec
-
-        case $ec in
-          p) read -p "New port: " np
-             jq --argjson n "$np" '(.nodes[] | select(.name=="input").settings.port) = $n' "$ef" > tmp && mv tmp "$ef" ;;
-          d) read -p "New device: " nd
-             jq --arg n "$nd" '(.nodes[] | select(.type=="TunDevice").settings["device-name"]) = $n' "$ef" > tmp && mv tmp "$ef" ;;
-          i) read -p "New priv Iran: " ni
-             read -p "New priv Kharej: " nk
-             jq --arg ni "$ni" --arg nk "$nk" '
-               (.nodes[] | select(.type=="TunDevice").settings["device-ip"]) = "\($ni)/24";
-               (.nodes[] | select(.settings["ipv4"]=="old_kh")).settings.ipv4 = $nk' "$ef" > tmp && mv tmp "$ef" ;;  # نیاز به تنظیم دقیق‌تر
-          r) read -p "New proto (udp/tcpswap): " npr
-             read -p "New number: " nnum
-             jq --arg k "$npr" --argjson v "$nnum" '(.nodes[] | select(.type=="IpManipulator").settings) = {($k): $v}' "$ef" > tmp && mv tmp "$ef" ;;
-          *) echo "Not supported yet" ;;
-        esac
-        echo -e "${Cyan}Edited.${NC}"
-        ;;
-    4)  list_tunnels
-        read -p "Delete which number? " dn
-        rm -f "config${dn}.json" 2>/dev/null && update_core && echo -e "${YELLOW}Deleted.${NC}"
-        ;;
-    5)  tail -n 60 log/core.log log/network.log 2>/dev/null || echo "No logs"
-        read -p "Live tail? (y/n): " lt
-        [[ $lt = "y" ]] && tail -f log/*.log
-        ;;
-    6)  read -p "Really uninstall ALL? (y/N): " uy
-        [[ $uy = "y" || $uy = "Y" ]] && {
-          systemctl stop waterwall 2>/dev/null
-          rm -f /etc/systemd/system/waterwall.service
-          rm -rf "$INSTALL_DIR"
-          (crontab -l | grep -v waterwall | crontab -)
-          echo -e "${YELLOW}Uninstall done.${NC}"
-        }
-        ;;
-    0)  exit 0 ;;
-    *)  echo "Invalid choice" ;;
+    1)
+      read -p "Which side are you configuring now? (i = Iran / k = Kharej): " s
+      side=$([ "$s" = "i" ] && echo "iran" || echo "kharej")
+      create_tunnel_pair
+      create_service
+      setup_auto_restart
+      ;;
+    2)
+      setup_auto_restart
+      ;;
+    3)
+      echo -e "\n${Cyan}Current crontab entries for Waterwall:${NC}"
+      crontab -l | grep -i waterwall || echo "No cron jobs found for waterwall"
+      ;;
+    4)
+      read -p "Are you sure you want to uninstall everything? (y/N): " confirm
+      if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        systemctl stop waterwall 2>/dev/null
+        systemctl disable waterwall 2>/dev/null
+        rm -f /etc/systemd/system/waterwall.service
+        pkill -f Waterwall 2>/dev/null
+        rm -rf "$INSTALL_DIR"
+        (crontab -l 2>/dev/null | grep -v "waterwall.service") | crontab -
+        echo -e "${YELLOW}Uninstall completed.${NC}"
+      fi
+      ;;
+    0)
+      echo "Exiting..."
+      exit 0
+      ;;
+    *)
+      echo -e "${RED}Invalid choice${NC}"
+      ;;
   esac
 done
